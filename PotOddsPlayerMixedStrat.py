@@ -49,6 +49,7 @@ STREET_RANK_MAP ={
     'river': 3  
 }
 
+
 class PotOddsPlayerMixedStrat(BasePokerPlayer):
     def __init__(self):
         self.name = "MyPlayer"
@@ -69,10 +70,36 @@ class PotOddsPlayerMixedStrat(BasePokerPlayer):
             'limp':0, # conservative: When the oppenent calls the big blind
             'check':0, # conservative: When the opponent checks the big blind
             'raise':0, # aggressive: When the opponent raises the big blind
+            're-raise': 0, # aggressive: When the opponent re-raises
+            'folded_to_raise': 0, # aggressive: When folds under pressure
+            'call': 0, # aggressive: When the opponent calls the raise
         }
+        self.STARTING_RANGE = {
+            '20th_percentile': 38.9,
+            '40th_percentile': 45.1,
+            '60th_percentile': 51.5,
+            '80th_percentile': 57.6,
+            '85th_percentile': 59.13,
+            '90th_percentile': 61.9,
+        }
+        self.POLICY_ADJUSTMENT = {
+            'call_threshold_adjustment': 0,
+            'raise_threshold_adjustment': 0,
+        }
+        self.OPPONENT_TRAITS ={
+            'opponent_tightness': 0,
+            'opponent_aggressiveness': 0,
+        }
+        self.POLICY_REFERENCE = {
+            'raise_rate': 0.4,
+            'call_rate': 0.4,
+            'fold_rate': 0.20,
+        }
+        
         self.poker_utils = PokerUtils()
         self.last_round_state = None
         self.last_action = None
+        self.opponent_last_action = None
         self.last_street = None
         self.opponent_uuid = None
         self.uuid = None
@@ -96,10 +123,15 @@ class PotOddsPlayerMixedStrat(BasePokerPlayer):
             
         
         if self.is_new_round(round_state):
+            if self.last_round_state is not None:
+                self.update_opponent_preflop_stats(self.last_round_state)
+                self.update_folded_stats(round_state)
+            
             round = round_state['round_count']
             if round % 30 == 0:
                 print(f"Round {round} starting")
             self.setup_new_round(round_state)
+            self.adjust_policy(round_state)
             
         cur_street = round_state['street']
         
@@ -108,38 +140,22 @@ class PotOddsPlayerMixedStrat(BasePokerPlayer):
         call_size = self.poker_utils.get_call_size(round_state)
         #can optimize slightly by using the call size
         raise_size = self.poker_utils.get_raise_size(round_state)
-        
-        self.update_opponent_opening_stats(round_state)
         if cur_street == 'preflop':
-            #check the hand winning percentage
+            action = self.preflop_strategy(hole_card, round_state)
             
-            winning_percentage = self.poker_utils.get_opening_hand_winning_percentage(hole_card)
-            # print (f"Winning percentage for {hand}: {winning_percentage}")
-            
-            #calculate the pot odds for calling
-            pot_odds = self.poker_utils.calculate_pot_odds(call_size, pot_size)
-            if winning_percentage < pot_odds:
-                action = valid_actions[0]['action']
-            # elif winning_percentage > self.preflop_raise_threshold and len(valid_actions) == 3:
-            #     action = valid_actions[2]['action']
-            else:
-                action = valid_actions[1]['action']
-                
-            #TODO update the opponent opening stats
-            
-        
         else:
             pot_size = round_state['pot']['main']['amount']
             
             hole_card = gen_cards(hole_card)
             community_card = gen_cards(community_card)
-            win_rate = estimate_hole_card_win_rate(300, 2, hole_card, community_card)
+            win_rate = estimate_hole_card_win_rate(500, 2, hole_card, community_card)
             # print(f"Win rate: {win_rate:.2f}")
             
             to_call = None
             to_raise = False
             #calculate the pot odds for calling
-            call_pot_odds = self.poker_utils.calculate_pot_odds(call_size, pot_size)
+            call_pot_odds = self.poker_utils.calculate_pot_odds(call_size, pot_size) + self.POLICY_ADJUSTMENT['call_threshold_adjustment']
+            
             if win_rate > call_pot_odds:
                 to_call = True
             else:
@@ -148,36 +164,21 @@ class PotOddsPlayerMixedStrat(BasePokerPlayer):
             #calculate the pot odds for raising
             # raise_pot_odds = raise_size / (pot_size + raise_size)
             
-            if win_rate > self.raise_threshold:
+            if win_rate > self.raise_threshold + self.POLICY_ADJUSTMENT['raise_threshold_adjustment']:
                 to_raise = True
-                
-            #randomize the decision to raise or call
                 
             #decide whether to call or raise
             if to_raise and len(valid_actions) == 3:
-                # Randomly decide to raise or call
-                # to_raise = np.random.rand() < 0.8
-                # if to_raise:
-                #     action = valid_actions[2]['action']
-                # else:
-                #     action = valid_actions[1]['action']
                 action = valid_actions[2]['action']
             elif to_call:
-                #randomly decide to call or raise
-                # raise_prob = (win_rate - call_pot_odds)/(self.raise_threshold - call_pot_odds)
-                # to_raise = np.random.rand() < (raise_prob/2)
-                # to_raise = np.random.rand() < 0.8
-                # if to_raise and len(valid_actions) == 3:
-                #     action = valid_actions[2]['action']
-                # else:
-                #     action = valid_actions[1]['action']
                 action = valid_actions[1]['action']
                 
             else:
                 action = valid_actions[0]['action']
         # Update action statistics
+        
         self.update_last_action_and_stats(action, call_size)
-        self.update_round_state(round_state)
+        self.update_round_state_and_street(round_state)
         # time_taken = time.time() - start_time
         # print(f"Time taken to decide action: {time_taken:.6f} seconds")
         #TODO: update last action
@@ -187,14 +188,6 @@ class PotOddsPlayerMixedStrat(BasePokerPlayer):
         next_player = round_state['next_player']
         self.uuid = round_state['seats'][next_player]['uuid']
         self.opponent_uuid = round_state['seats'][1]['uuid'] if next_player==0 else round_state['seats'][0]['uuid']
-    
-    # def update_opponent_action_stats(self, action, call_size):
-    #     if action == 'call' and call_size == 0:
-    #         self.action_stats['check'] += 1
-    #     elif action == 'raise' and call_size == 0:
-    #         self.action_stats['bet'] += 1  
-    #     else:
-    #         self.action_stats[action] += 1
     
     def update_last_action_and_stats(self, self_action, call_size):
         
@@ -233,7 +226,7 @@ class PotOddsPlayerMixedStrat(BasePokerPlayer):
             return True
         return False
     
-    def update_round_state(self, round_state):
+    def update_round_state_and_street(self, round_state):
         self.last_round_state = round_state
         self.last_street = round_state['street']
         # self.last_action = None
@@ -248,61 +241,100 @@ class PotOddsPlayerMixedStrat(BasePokerPlayer):
         return False
     
     def setup_new_round(self, round_state):
-        self.update_opponent_folded_stats(round_state)
         preflop_actions_length = len(round_state['action_histories']['preflop'])
-        # print(f"Preflop actions length: {preflop_actions_length}")
-        #TODO: check who folded
         #check if the player is small blind or big blind
         if preflop_actions_length == 2:
             self.last_action = 'smallblind'
             self.is_small_blind = True
         elif preflop_actions_length == 3:
             self.last_action = 'bigblind'
+            self.is_small_blind = False
         else:
-            pass
-    
-    def update_opponent_folded_stats(self, round_state):
-        cur_street = round_state['street']
-        
-        if self.last_action != 'fold' and self.last_street != 'river':
-            if self.last_street == 'flop':
-                self.opponent_opening_stats['fold'] += 1
-        #TODO: check if the opponent has folded
-        
-        
-    def update_opponent_opening_stats(self, round_state):
-        cur_street = round_state['street']
-        preflop_action_history = round_state['action_histories']['preflop']     
-                
-        if cur_street == 'turn' or cur_street == 'river':
             return
-        elif cur_street == 'flop':
-            # preflop last action made by my player, no opponent action missed
-            flop_action_history = round_state['action_histories']['flop']
-            if self.uuid == preflop_action_history[-1]['uuid']:
-                return
-            
-            # not immediately after preflop, no opponent action missed
-            if (self.is_small_blind and len(flop_action_history) > 1) or (not self.is_small_blind and len(flop_action_history) >0):
-                return
-            
-            #immediately after preflop and last action not made by my player opponent action missed
-            opponent_action = preflop_action_history[-1]['action'].lower()
-            if opponent_action == 'call' and self.last_action == 'call':
-                self.opponent_opening_stats['check'] += 1
-            
-            # if opponent_action == 'call' and self.last_action == 'bet':
-            #     #bet refers to raising the big blind
-            #     self.opponent_opening_stats['fold'] += 1
-            
+    
+    def update_folded_stats(self, cur_round_state):
+        if self.last_action == 'fold':
+            if cur_round_state['round_count'] - self.last_round_state['round_count'] > 1:
+                self.opponent_opening_stats['fold'] += cur_round_state['round_count'] - self.last_round_state['round_count'] -1
+            return
         else:
-            opponent_action = preflop_action_history[-1]['action'].lower()
-            if opponent_action == 'raise':
-                self.opponent_opening_stats['raise'] += 1    
-            if opponent_action == 'call' and self.last_action == 'bigblind':
-                self.opponent_opening_stats['limp'] += 1
+            match self.last_street:
+                case 'preflop':
+                    if cur_round_state['round_count'] - self.last_round_state['round_count'] > 1:
+                        self.opponent_opening_stats['fold'] += cur_round_state['round_count'] - self.last_round_state['round_count']
+                    if self.last_action == 'bet' or self.last_action == 'raise':
+                        self.opponent_opening_stats['folded_to_raise'] += 1
+                    elif self.is_small_blind and self.last_action == 'call':
+                        self.opponent_opening_stats['fold'] += 1
+                case 'flop':
+                    pass
+                case 'turn':
+                    pass
+                case 'river':
+                    pass
+                case _:
+                    pass
             
+    def preflop_strategy(self, hole_card, round_state):
+        #check the hand winning percentage
+        winning_percentage = self.poker_utils.get_opening_hand_winning_percentage(hole_card)
+        action =None
+        #TODO: adjust range based on opponent's action
         
+        
+        if self.is_small_blind:
+            if self.last_action == 'smallblind':
+                call_threshold = self.STARTING_RANGE['20th_percentile'] + self.POLICY_ADJUSTMENT['call_threshold_adjustment']
+                raise_threshold = self.STARTING_RANGE['40th_percentile'] + self.POLICY_ADJUSTMENT['raise_threshold_adjustment']
+                if winning_percentage < call_threshold:
+                    action = 'fold'
+                elif winning_percentage < raise_threshold:
+                    action = 'call'
+                else:
+                    action = 'raise'
+            elif self.last_action == 'raise' or self.last_action == 'call' or self.last_action == 'bet':
+                action = 'call'
+                if winning_percentage > self.STARTING_RANGE['85th_percentile']:
+                    action = 'raise'
+        else:
+            if self.last_action == 'bigblind':
+                call_threshold = self.STARTING_RANGE['20th_percentile'] + self.POLICY_ADJUSTMENT['call_threshold_adjustment']
+                if winning_percentage < call_threshold:
+                    action = 'fold'
+                elif winning_percentage < self.STARTING_RANGE['85th_percentile']:
+                    action = 'call'
+                else:
+                    action = 'raise'
+            elif self.last_action == 'raise' or self.last_action == 'bet':
+                action = 'raise'
+        if action is None:        
+            print(f"self.last_action: {self.last_action}")
+            print(f"self.is_small_blind: {self.is_small_blind}")
+        return action
+    
+    def adjust_policy(self, round_state):
+        total_hands = round_state['round_count']
+        
+        
+        if total_hands < 100:
+            return
+        if total_hands % 50 == 0:
+            # print(f"self POLICY_ADJUSTMENT: {self.POLICY_ADJUSTMENT}")
+            opponent_opening_fold_count = self.opponent_opening_stats['fold'] + self.opponent_opening_stats['folded_to_raise']
+            opponent_conservative_count = self.opponent_opening_stats['check'] + self.opponent_opening_stats['limp']
+            opponent_aggressive_count = self.opponent_opening_stats['raise'] + self.opponent_opening_stats['re-raise']
+            # tightness = opponent_opening_fold_count / total_hands
+            aggressiveness = opponent_aggressive_count / total_hands
+            self.OPPONENT_TRAITS['opponent_aggresiveness'] = aggressiveness
+            call_threshold_adjustment = aggressiveness - self.POLICY_REFERENCE['raise_rate']/2
+            self.POLICY_ADJUSTMENT['call_threshold_adjustment'] = min(max(call_threshold_adjustment,-0.05),0.05)
+            
+            tightness = opponent_opening_fold_count / total_hands
+            self.OPPONENT_TRAITS['opponent_tightness'] = tightness
+            raise_threshold_adjustment = -(tightness - self.POLICY_REFERENCE['fold_rate'])/2
+            self.POLICY_ADJUSTMENT['raise_threshold_adjustment'] = min(max(raise_threshold_adjustment,-0.05),0.05)
+            
+            
     def print_opponent_openning_stats(self):
         print("PotOddsPlayerMixedStrat opponent opening statistics:")
         for action, count in self.opponent_opening_stats.items():
@@ -314,5 +346,54 @@ class PotOddsPlayerMixedStrat(BasePokerPlayer):
         for action, count in self.action_stats.items():
             print(f"Action: {action}, Count: {count}")
 
+    #call only if is new round
+    def update_opponent_preflop_stats(self, last_round_state):
+        preflop_action_history = last_round_state['action_histories']['preflop']
+        preflop_actions_length = len(preflop_action_history)
+        # TODO Handle is small blind carefully
+        i_am_small_blind = preflop_action_history[0]['uuid'] == self.uuid
+        
+        opponent_action_index = 3 if (i_am_small_blind) else 2
+        if i_am_small_blind:
+            for i in range(opponent_action_index, preflop_actions_length, 2):
+                opponent_action = preflop_action_history[i]['action'].lower()
+                my_action = preflop_action_history[i-1]['action'].lower()
+                if opponent_action == 'call':
+                    if (my_action == 'call'):
+                        self.opponent_opening_stats['check'] += 1
+                    elif my_action == 'raise':
+                        self.opponent_opening_stats['call'] += 1
+                    else:
+                        pass
+                #opponent action is raise
+                else:
+                    if (my_action == 'call'):
+                        self.opponent_last_action = 'raise'
+                        self.opponent_opening_stats['raise'] += 1  
+                    # my_action == raise
+                    else:
+                        self.opponent_last_action = 're-raise'
+                        self.opponent_opening_stats['re-raise'] += 1
+        else:
+            for i in range(opponent_action_index, preflop_actions_length, 2):
+                opponent_action = preflop_action_history[i]['action'].lower()
+                my_action = preflop_action_history[i-1]['action'].lower()
+                if opponent_action == 'call':
+                    if (my_action == 'bigblind'):
+                        self.opponent_opening_stats['limp'] += 1
+                    elif my_action == 'raise':
+                        self.opponent_opening_stats['call'] += 1
+                    else:
+                        pass
+                #opponent action is raise
+                else:
+                    if (my_action == 'bigblind'):
+                        self.opponent_last_action = 'raise'
+                        self.opponent_opening_stats['raise'] += 1  
+                    # my_action == raise
+                    else:
+                        self.opponent_last_action = 're-raise'
+                        self.opponent_opening_stats['re-raise'] += 1
+        
 def setup_ai():
-  return PotOddsPlayerMixedStrat()
+    return PotOddsPlayerMixedStrat()
