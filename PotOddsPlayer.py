@@ -5,7 +5,7 @@ import json
 from pypokerengine.engine.card import Card
 from pypokerengine.utils.card_utils import gen_deck, gen_cards, estimate_hole_card_win_rate
 import time
-
+import pprint
 RANK_MAP = {
       2  :  '2',
       3  :  '3',
@@ -44,6 +44,12 @@ class PotOddsPlayer(BasePokerPlayer):
         open_file = open('hand_win_percentages.json', 'r')
         self.starting_hand_winning_percentage = json.load(open_file)
         open_file.close()
+        self.action_stats = {
+            'check': 0,
+            'call': 0,
+            'raise': 0,
+            'fold': 0
+        }
         # self.starting_hand_winning_percentage = self.hand_win_percentages.get("starting_hand", 0)
 
     def declare_action(self, valid_actions, hole_card, round_state):
@@ -82,21 +88,19 @@ class PotOddsPlayer(BasePokerPlayer):
                 hand += 'o'
             
             winning_percentage = self.starting_hand_winning_percentage[hand][0]['Win %']
-            print (f"Winning percentage for {hand}: {winning_percentage}")
+            # print (f"Winning percentage for {hand}: {winning_percentage}")
             
             #calculate the pot odds for calling
             if call_size == 0:
                 pot_odds = 0
             else:
-                pot_odds = call_size / (pot_size + call_size) 
-                
-                
-            
-            
+                pot_odds = call_size / (pot_size + call_size)       
             if winning_percentage < pot_odds:
                 action = valid_actions[0]['action']
+                print("fold preflop")
             else:
                 action = valid_actions[1]['action']
+            
             
         
         else:
@@ -105,7 +109,7 @@ class PotOddsPlayer(BasePokerPlayer):
             hole_card = gen_cards(hole_card)
             community_card = gen_cards(community_card)
             win_rate = estimate_hole_card_win_rate(300, 2, hole_card, community_card)
-            print(f"Win rate: {win_rate:.2f}")
+            # print(f"Win rate: {win_rate:.2f}")
             
             to_call = False
             to_raise = False
@@ -129,8 +133,13 @@ class PotOddsPlayer(BasePokerPlayer):
             else:
                 action = valid_actions[0]['action']
                 
-        time_taken = time.time() - start_time
-        print(f"Time taken to decide action: {time_taken:.6f} seconds")
+        # print(f"Action taken: {action}")
+        if action == 'call' and call_size == 0:
+            self.action_stats['check'] += 1
+        else:
+            self.action_stats[action] += 1
+        # time_taken = time.time() - start_time
+        # print(f"Time taken to decide action: {time_taken:.6f} seconds")
         return action
 
 
@@ -156,7 +165,7 @@ class PotOddsPlayer(BasePokerPlayer):
             return 0
         else:
             last_action = street_actions[-1]
-            call_size = last_action['amount']
+            call_size = last_action.get('add_amount',0)
         return call_size
     def get_pot_size(self, round_state):
         pot_size = round_state['pot']['main']['amount']
@@ -171,7 +180,10 @@ class PotOddsPlayer(BasePokerPlayer):
             raise_size = 40 + call_size
         return raise_size
         
-        
+    def print_action_stats(self):
+        print("PotOddsPlayer action stats:")
+        for action, count in self.action_stats.items():
+            print(f"Action: {action}, Count: {count}")
         
 
 def setup_ai():
