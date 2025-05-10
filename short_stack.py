@@ -78,7 +78,7 @@ class ShortStacked(BasePokerPlayer):
             'folded_to_raise': 0, # aggressive: When folds under pressure
             'call': 0, # aggressive: When the opponent calls the raise
         }
-        self.opponenet_num_raises = 0
+        self.opponent_num_raises = 0
         self.POLICY_ADJUSTMENT = {
             'call_threshold_adjustment': 0,
             'raise_threshold_adjustment': 0,
@@ -97,18 +97,22 @@ class ShortStacked(BasePokerPlayer):
         self.last_round_state = None
         self.last_action = None
         self.opponent_last_action = None
-        self.last_street = None
+        self.last_sreet = None
         self.opponent_uuid = None
         self.uuid = None
         self.is_small_blind = None
         self.opponent_tightness = 0 
         self.flop_win_rate = []
         self.river_win_rate = []
+        self.opp_total_raise_win = 1e-4
+        self.opp_total_raise_loss = 1e-4
+        self.prev_stack = None
+        
 
     def declare_action(self, valid_actions, hole_card, round_state):
         # start_time = time.time()
         # valid_actions format => [raise_action_pp = pprint.PrettyPrinter(indent=2)
-        # pp = pprint.PrettyPrinter(indent=2)
+        pp = pprint.PrettyPrinter(indent=2)
         # print("------------ROUND_STATE(RANDOM)--------")
         # pp.pprint(round_state)
         # print("------------HOLE_CARD----------")
@@ -119,21 +123,48 @@ class ShortStacked(BasePokerPlayer):
         action = None
         if self.uuid is None:
             self.get_player_uuids(round_state)
+            self.prev_stack = round_state['seats'][0]['stack'] if self.uuid == round_state['seats'][0]['uuid'] else round_state['seats'][1]['stack']
             
             
         
         if self.is_new_round(round_state):
-            # print("New round starting")
-            self.opponenet_num_raises = 0
-            if self.last_round_state is not None:
-                self.update_opponent_preflop_stats(self.last_round_state)
-                self.update_folded_stats(round_state)
+            self.opponent_num_raises = 0
+            # -------------------------------
+            # New code here
+
+            
+            if (round_state['round_count']) > 1 and self.last_action != 'fold' and self.last_round_state['street'] == 'river':
+
+                # Check whether the opponent won the previous round (This is the start of next round).
+                is_opp_win = 0
+                for p in round_state['seats']:
+                    if (p['uuid'] == self.uuid) and (p['stack'] <= self.prev_stack):
+                        is_opp_win = 1
+                    self.prev_stack = p['stack']
+                    
+                # Check whether the opponent won the previous round (This is the start of next round).
+                # Count the number of raise action by the opponent.
+                opp_raise = 0
+                # pp.pprint(self.last_round_state['action_histories'])
+                for street in self.last_round_state['action_histories']:
+                    # print("street", street)
+                    
+                    for act in self.last_round_state['action_histories'][street]:
+                        if (act['uuid'] != self.uuid) and (act['action'].lower() == 'raise'):
+                            if is_opp_win:
+                                self.opp_total_raise_win += 1
+                            else:
+                                self.opp_total_raise_loss += 1
+        
+
+                
+            # ---------------------------------------
             
             round = round_state['round_count']
             if round % 30 == 0:
                 print(f"Round {round} starting")
             self.setup_new_round(round_state)
-            self.adjust_policy(round_state)
+            # self.adjust_policy(round_state)
             
         cur_street = round_state['street']
         opponent_last_action = round_state['action_histories'][cur_street][-1]['action'] if len(round_state['action_histories'][cur_street]) > 0 else None
@@ -145,6 +176,8 @@ class ShortStacked(BasePokerPlayer):
         #can optimize slightly by using the call size
         raise_size = self.poker_utils.get_raise_size(round_state)
         
+       
+
         if cur_street == 'preflop':
             action = self.preflop_strategy(hole_card, round_state)
             
@@ -153,6 +186,7 @@ class ShortStacked(BasePokerPlayer):
         elif cur_street == 'turn':
             action = self.turn_policy(hole_card, round_state, valid_actions)
         else:
+            # print("RIVER reached")
             action = self.river_policy(hole_card, round_state, valid_actions)
        
         # Update action statistics
@@ -347,13 +381,31 @@ class ShortStacked(BasePokerPlayer):
         
         # print(f"win_rate: {win_rate}  call_pot_odds: {call_pot_odds}")
         self.river_win_rate.append(win_rate)
-        
-        if win_rate > (self.raise_threshold) and len(valid_actions) == 3:
-            action = 'raise'
-        elif (self.opponent_num_raises>=2 and win_rate > 0.53) or (win_rate > call_pot_odds and win_rate > 0.42) or call_pot_odds == 0:
-            action = 'call'
-        else:
-            action = 'fold'
+
+        opp_threshold = self.opp_total_raise_win/(self.opp_total_raise_win + self.opp_total_raise_loss)
+        # print("opp_threshold:", opp_threshold)
+        if opp_threshold > 0.3:       
+            if win_rate > (self.raise_threshold) and len(valid_actions) == 3:
+                action = 'raise'
+                # print("RAISING RIVER")
+            elif (self.opponent_num_raises>=2 and win_rate > 0.53) or (win_rate > call_pot_odds and win_rate > 0.42) or call_pot_odds == 0:
+                action = 'call'
+                # print("CALLING RIVER")
+            else:
+                action = 'fold'
+                # print("FOLDING RIVER")
+        else: # flagged Raise Agent
+            call_threshold = 0.53
+            
+            if win_rate > (self.raise_threshold) and len(valid_actions) == 3:
+                action = 'raise'
+                # print("RAISING RIVER")
+            elif (self.opponent_num_raises>=2 and win_rate > call_threshold-0.04) or (win_rate > call_pot_odds and win_rate > 0.42) or call_pot_odds == 0:
+                action = 'call'
+                # print("CALLING RIVER")
+            else:
+                action = 'fold'
+                # print("FOLDING RIVER")
         
         return action
     
